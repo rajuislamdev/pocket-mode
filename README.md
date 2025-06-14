@@ -26,6 +26,7 @@ lib/
 android/
 └── MainActivity.kt # Kotlin native code to manage sensor + wake lock
 
+
 ---
 
 ## 🔧 Setup Instructions
@@ -33,8 +34,8 @@ android/
 ### ✅ Requirements
 
 - Flutter SDK
-- Android device (physical or emulator with proximity sensor)
-- Kotlin support in Android project
+- Android device (with proximity sensor)
+- Kotlin setup in your Android module
 
 ---
 
@@ -42,12 +43,29 @@ android/
 
 ### 🟩 `main.dart`
 
-- Initializes the app.
-- Registers `WidgetsBindingObserver` to manage sensor lifecycle (stopping on app `detached`).
+Initializes the app and manages app lifecycle. Proximity listener is stopped when app is detached.
 
 ```dart
+import 'package:flutter/material.dart';
+import 'package:pocket_mode/services/proximity_service.dart';
+import 'package:pocket_mode/views/home_screen.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(const MyApp());
+}
+
 class MyApp extends StatelessWidget with WidgetsBindingObserver {
-  ...
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Pocket Mode',
+      home: const HomeScreen(),
+    );
+  }
+
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.detached) {
@@ -55,72 +73,186 @@ class MyApp extends StatelessWidget with WidgetsBindingObserver {
     }
   }
 }
-
-
 🟦 home_screen.dart
+The main UI. Starts proximity sensor listening in initState() and logs changes.
 
-* UI to observe proximity detection.
+import 'package:flutter/material.dart';
+import 'package:pocket_mode/services/proximity_service.dart';
 
-* Starts proximity listener in initState.
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  @override
+  void initState() {
+    super.initState();
+    ProximityService.startListening((isNear) {
+      debugPrint('isNear: $isNear');
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      body: Center(child: Text('Pocket Mode (Proximity Sensor)')),
+    );
+  }
+}
 
 🟨 proximity_service.dart
+Handles communication with the Android native side using MethodChannel.
 
-* Uses a MethodChannel to communicate with Android native code.
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 
-* Listens for proximity updates via onProximityChanged.
+class ProximityService {
+  static const _channel = MethodChannel('pocket_mode');
 
-static Future<void> startListening(Function(bool isNear) onChange) async {
-  _channel.setMethodCallHandler((call) async {
-    if (call.method == 'onProximityChanged') {
-      final bool isNear = call.arguments == true;
-      onChange(isNear);
+  static Future<void> startListening(Function(bool isNear) onChange) async {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onProximityChanged') {
+        final bool isNear = call.arguments == true;
+        onChange(isNear);
+      }
+    });
+    try {
+      await _channel.invokeMethod('startProximity');
+    } catch (error) {
+      debugPrint('Failed to start proximity sensor: $error');
     }
-  });
-  await _channel.invokeMethod('startProximity');
+  }
+
+  static Future<void> stopListening() async {
+    try {
+      await _channel.invokeMethod('stopProximity');
+    } catch (error) {
+      debugPrint('Failed to stop proximity sensor: $error');
+    }
+  }
 }
 
 
-🟥 MainActivity.kt
+🟥 MainActivity.kt (Android Native)
+Implements sensor listener and sends proximity data to Flutter.
 
-* Implements SensorEventListener
+package com.example.pocket_mode
 
-* Initializes SensorManager, PowerManager, and WakeLock
+import android.content.Context
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.PowerManager
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
-* Sends proximity state to Flutter via MethodChannel
+class MainActivity : FlutterActivity(), SensorEventListener {
 
-<uses-permission android:name="android.permission.WAKE_LOCK"/>
+    companion object {
+        private const val CHANNEL_NAME = "pocket_mode"
+        private const val WAKE_LOCK_TAG = "pocket_mode:WakeLock"
+    }
+
+    private lateinit var sensorManager: SensorManager
+    private var proximitySensor: Sensor? = null
+    private var methodChannel: MethodChannel? = null
+
+    private var powerManager: PowerManager? = null
+    private var wakeLock: PowerManager.WakeLock? = null
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+
+        setupSensors()
+        setupPowerManager()
+        setupMethodChannel(flutterEngine)
+    }
+
+    private fun setupSensors() {
+        sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
+        proximitySensor = sensorManager.getDefaultSensor(Sensor.TYPE_PROXIMITY)
+    }
+
+    private fun setupPowerManager() {
+        powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        wakeLock = powerManager?.newWakeLock(
+            PowerManager.PROXIMITY_SCREEN_OFF_WAKE_LOCK,
+            WAKE_LOCK_TAG
+        )
+    }
+
+    private fun setupMethodChannel(flutterEngine: FlutterEngine) {
+        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL_NAME)
+
+        methodChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "startProximity" -> startProximity(result)
+                "stopProximity" -> stopProximity(result)
+                else -> result.notImplemented()
+            }
+        }
+    }
+
+    private fun startProximity(result: MethodChannel.Result) {
+        proximitySensor?.let {
+            sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL)
+
+            if (wakeLock?.isHeld == false) {
+                wakeLock?.acquire()
+            }
+
+            result.success(null)
+        } ?: result.error("UNAVAILABLE", "Proximity sensor not available", null)
+    }
+
+    private fun stopProximity(result: MethodChannel.Result) {
+        sensorManager.unregisterListener(this)
+        if (wakeLock?.isHeld == true) {
+            wakeLock?.release()
+        }
+        result.success(null)
+    }
+
+    override fun onSensorChanged(event: SensorEvent?) {
+        if (event?.sensor?.type != Sensor.TYPE_PROXIMITY) return
+
+        val isNear = event.values[0] < (proximitySensor?.maximumRange ?: 0f)
+        methodChannel?.invokeMethod("onProximityChanged", isNear)
+    }
+
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+}
 
 🔐 Permissions
-Ensure you add the required permission in AndroidManifest.xml:
+Add this to your AndroidManifest.xml:
 
 <uses-permission android:name="android.permission.WAKE_LOCK"/>
 
-
-💡 Use Cases
-* Lock screen automatically when phone is in pocket
-
-* Save power by turning off screen when face-down
-
-* Block unwanted touch inputs during calls or when pocketed
+face
 
 🧪 Testing
-To test:
+1. Run the app on a real Android device with a proximity sensor.
 
-* Run the app on a real Android device with a proximity sensor.
+2. Cover the top part of the phone where the proximity sensor is located.
 
-* Cover the top front part of the device (where the sensor is).
+3. Check the debug console for output like:
 
-* Observe logs for isNear: true/false.
+isNear: true
 
 ⚠️ Notes
-* This implementation works on Android only.
+- This feature works only on Android
 
-📃 License
-* MIT License. See the LICENSE file for details.
+- PROXIMITY_SCREEN_OFF_WAKE_LOCK is deprecated in newer Android versions, but still works
 
-🙋‍♂️ Author
-Made with ❤️ by Md. Raju Islam
-📧 Email: rajuislam.dev@gmail.com
-🐦 Linkedin: https://www.linkedin.com/in/rajuislamdev/
-🌐 Website: rajuislam.com
 ```
+## 🙋‍♂️ Author
+
+Made with ❤️ by **Md. Raju Islam**  
+📧 Email: [rajuislam.dev@gmail.com](mailto:rajuislam.dev@gmail.com)  
+🔗 [LinkedIn](https://www.linkedin.com/in/rajuislamdev/)  
+🌐 [rajuislam.com](https://rajuislam.com)
