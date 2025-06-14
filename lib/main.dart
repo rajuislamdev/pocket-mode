@@ -17,10 +17,8 @@ class MyApp extends StatelessWidget with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused) {
-    } else if (state == AppLifecycleState.resumed) {
-    } else if (state == AppLifecycleState.detached) {
+    if (state == AppLifecycleState.detached) {
       ProximityService.stopListening();
-    } else if (state == AppLifecycleState.inactive) {}
+    }
   }
 }
